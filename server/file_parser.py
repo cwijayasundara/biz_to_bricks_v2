@@ -108,9 +108,3 @@ def parse_file_with_llama_parse(file_path: str,
         print(f"LLAMA_CLOUD_API_KEY is {'set' if llama_cloud_api_key else 'not set'}")
         raise
 
-# test the function
-# file_path = "server/uploaded_files/Sample1.pdf"
-# print(f"Parsing file: {file_path}")
-# text, metadata = parse_file_with_llama_parse(file_path)
-# print(f"Text nodes: {text}")
-# print(f"Metadata: {metadata}")  

@@ -8,8 +8,10 @@ import os
 from pathlib import Path as FilePath
 import logging
 from typing import Dict, List, Any, Optional, Union
+from contextlib import asynccontextmanager
+from ingest_docs import ingest_documents_to_pinecone_and_bm25
+from hybrid_search import execure_hybrid_chain
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -23,10 +25,20 @@ EDITED_FILE_PATH = "edited_files"
 SUMMARIZED_FILE_PATH = "summarized_files"
 
 # Initialize FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: initialize resources
+    ensure_directories_exist()
+    logger.info("Application started, directories initialized")
+    yield
+    # Shutdown: cleanup (if needed)
+    logger.info("Application shutting down")
+
 app = FastAPI(
     title="Document Processing API",
     description="API for uploading, parsing, editing, and summarizing documents",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Define data models
@@ -52,6 +64,11 @@ class FilesListResponse(BaseModel):
     """Model for file listing responses"""
     files: List[str] = Field(..., description="List of file names")
 
+# Define data models for search
+class SearchQuery(BaseModel):
+    """Model for search queries"""
+    query: str = Field(..., description="The search query")
+
 # Helper functions
 def ensure_directories_exist():
     """Ensure all required directories exist"""
@@ -64,13 +81,6 @@ def get_file_path(directory: str, filename: str, extension: Optional[str] = None
     if extension:
         return str(FilePath(directory) / f"{base_name}{extension}")
     return str(FilePath(directory) / filename)
-
-# Ensure directories exist at startup
-@app.on_event("startup")
-async def startup_event():
-    """Initialize resources on application startup"""
-    ensure_directories_exist()
-    logger.info("Application started, directories initialized")
 
 # API Routes
 @app.post("/uploadfile/", response_model=FileResponse, status_code=status.HTTP_201_CREATED)
@@ -244,7 +254,12 @@ async def summarize_content(
     logger.info(f"Summarizing file: {filename}")
     
     try:
-        file_path = get_file_path(PARSED_FILE_PATH, filename)
+        # Summarize edited file if available, else fallback to parsed
+        edited_file_path = get_file_path(EDITED_FILE_PATH, filename, extension=".md")
+        if os.path.exists(edited_file_path):
+            file_path = edited_file_path
+        else:
+            file_path = get_file_path(PARSED_FILE_PATH, filename, extension=".md")
         summarized_file_path = get_file_path(SUMMARIZED_FILE_PATH, filename)
         
         # Check if the summarized file already exists
@@ -287,6 +302,43 @@ async def summarize_content(
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": f"Failed to summarize file: {str(e)}"}
+        )
+
+@app.post("/ingestdocuments/{filename}")
+async def ingest_documents(filename: str = Path(..., description="Name of the file to ingest")):
+    """
+    Ingest documents to Pinecone and BM25 index.
+    """
+    try:
+        ingest_documents_to_pinecone_and_bm25(filename)
+        return {"message": f"Documents ingested to Pinecone and BM25 index for {filename}"}
+    except FileNotFoundError as e:
+        logger.error(f"File not found for ingestion: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": f"File {filename} not found in server/edited_files or server/parsed_files. Please parse the file first."}
+        )
+    except Exception as e:
+        logger.error(f"Error during ingestion for {filename}: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": f"Failed to ingest file: {str(e)}"}
+        )
+
+# Hybrid search
+@app.post("/hybridsearch/")
+async def hybrid_search(search_query: SearchQuery):
+    """
+    Perform a hybrid search using Pinecone and BM25.
+    """
+    try:
+        result = execure_hybrid_chain(search_query.query)
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Error during hybrid search: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": f"Failed to perform hybrid search: {str(e)}"}
         )
 
 # Error handlers

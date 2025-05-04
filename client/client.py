@@ -10,8 +10,10 @@ UPLOAD_API_URL = f"{BASE_URL}/uploadfile/"
 LIST_FILES_API_URL = f"{BASE_URL}/listfiles/uploaded_files"
 PARSE_FILE_API_URL = f"{BASE_URL}/parsefile/"
 SAVE_CONTENT_API_URL = f"{BASE_URL}/savecontent/"
-LIST_FILE_FOR_SUMMARIZE = f"{BASE_URL}/listfiles/parsed_files"
+LIST_FILE_FOR_SUMMARIZE = f"{BASE_URL}/listfiles/edited_files"
 SUMMARIZE_CONTENT_API_URL_BASE = f"{BASE_URL}/summarizecontent"
+INGEST_DOCUMENTS_API_URL = f"{BASE_URL}/ingestdocuments/"
+HYBRID_SEARCH_API_URL = f"{BASE_URL}/hybridsearch/"
 SAMPLE_FILES_DIR = Path("../docs")  # Path to docs folder with sample files
 
 # Set page config for better UI
@@ -36,7 +38,7 @@ def make_api_request(url, method="get", data=None, files=None, handle_error=True
         else:
             return {"error": f"Unsupported method: {method}"}
             
-        if response.status_code == 200:
+        if response.status_code in (200, 201):
             return response.json()
         else:
             error_msg = f"API Error: {response.status_code}"
@@ -82,7 +84,7 @@ def main():
     st.write("Upload, view, parse, and summarize documents using FastAPI backend.")
     
     # Create tabs for different functionality
-    tab1, tab2, tab3, tab4 = st.tabs(["📤 Upload", "📋 View Files", "📝 Parse Files", "📊 Summarize"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📤 Upload", "📋 View Files", "📝 Parse Files", "📊 Summarize", "📚 Ingest Documents", "🔍 Hybrid Search"])
     
     with tab1:
         upload_files()
@@ -96,6 +98,12 @@ def main():
     with tab4:
         summarize_files_tab()
     
+    with tab5:
+        ingest_documents_tab()
+
+    with tab6:
+        hybrid_search_tab()
+
 def upload_files():
     st.header("Upload Files")
     
@@ -177,16 +185,25 @@ def parse_files():
     
     if files:
         selected_file = st.selectbox(
-            "Select a file to parse", 
-            ["None"] + files, 
+            "Select a file to parse",
+            ["None"] + files,
             key="parse_file_select",
             help="Choose a file to convert to structured text"
         )
-        
+        # Clear previous parsed file if selection changes
+        if "parsed_file" in st.session_state and st.session_state["parsed_file"] != selected_file:
+            del st.session_state["parsed_file"]
         if selected_file != "None":
             st.info(f"Selected: {selected_file}")
-            if st.button("Parse File", type="primary"):
-                display_parsed_file(selected_file)
+            # Trigger parse once
+            parse_clicked = st.button(
+                "Parse File", key=f"parse_{selected_file}", type="primary"
+            )
+            if parse_clicked:
+                st.session_state["parsed_file"] = selected_file
+        # Always display parsed content once parsed
+        if st.session_state.get("parsed_file") == selected_file:
+            display_parsed_file(selected_file)
     else:
         st.info("No files found on the server to parse.")
 
@@ -204,26 +221,23 @@ def display_parsed_file(filename):
                 st.session_state.original_content = {}
                 
             text_content = result.get("text_content", "No content found")
-            st.session_state.original_content[filename] = text_content
+            # Only initialize original content once
+            if filename not in st.session_state.original_content:
+                st.session_state.original_content[filename] = text_content
             
             # Edit Parsed Content Expander
             with st.expander("Edit Parsed Content", expanded=True):
                 text_area_key = f"edited_content_{filename}"
-                if text_area_key not in st.session_state:
-                    st.session_state[text_area_key] = text_content
-                    
+                # Use text_area default for initial value, no manual session state assignment
                 edited_content = st.text_area(
                     "You can edit the content below:",
-                    value=st.session_state[text_area_key],
+                    text_content,
                     height=500,
                     key=text_area_key
                 )
                 
-                # Save Changes Button
-                col1, col2 = st.columns([1, 4])
-                with col1:
-                    save_clicked = st.button("💾 Save Changes", key=f"save_{filename}")
-                    
+                # Save Changes Button inside expander
+                save_clicked = st.button("💾 Save Changes", key=f"save_{filename}")
                 if save_clicked:
                     if edited_content != st.session_state.original_content[filename]:
                         with st.spinner("Saving changes..."):
@@ -232,11 +246,11 @@ def display_parsed_file(filename):
                                 method="post", 
                                 data={"content": edited_content}
                             )
-                        
+                            
                         if "error" not in save_result:
                             st.success(save_result.get("message", "Changes saved successfully!"))
+                            # Update original content after save
                             st.session_state.original_content[filename] = edited_content
-                            st.session_state[text_area_key] = edited_content
                     else:
                         st.info("No changes detected.")
             
@@ -290,6 +304,11 @@ def summarize_files_tab():
 def summarize_and_display(filename):
     """Fetch and display the summary for a file with error handling"""
     summary_key = f"summary_{filename}"
+    # Display the edited document content if available
+    edited_key = f"edited_content_{filename}"
+    if edited_key in st.session_state:
+        with st.expander("Document Content", expanded=True):
+            st.markdown(st.session_state[edited_key])
     
     with st.spinner(f"Summarizing {filename}..."):
         result = make_api_request(
@@ -309,6 +328,50 @@ def summarize_and_display(filename):
         if "metadata" in result:
             with st.expander("Summary Metadata", expanded=False):
                 st.json(result["metadata"])
+
+# ingest the documents to pinecone and bm25 index
+def ingest_documents_tab():
+    st.header("Ingest Documents")
+    st.write("Ingest documents to Pinecone and BM25 index.")
+    # Fetch .md files from both edited_files and parsed_files
+    edited_files = fetch_files(f"{BASE_URL}/listfiles/edited_files", "Loading edited files...")
+    parsed_files = fetch_files(f"{BASE_URL}/listfiles/parsed_files", "Loading parsed files...")
+    # Merge and filter for .md files only, remove duplicates
+    md_files = sorted(set([f for f in edited_files + parsed_files if f.endswith('.md')]))
+    selected_file = st.selectbox(
+        "Select a .md file to ingest",
+        ["None"] + md_files,
+        key="ingest_file_select",
+        help="Choose a markdown file to ingest to Pinecone and BM25 index"
+    )
+    if selected_file != "None":
+        if st.button("Ingest Document", type="primary"):
+            st.write(f"Ingesting {selected_file} to Pinecone and BM25 index...")
+            result = make_api_request(f"{INGEST_DOCUMENTS_API_URL}{selected_file}", method="post", handle_error=False)
+            if "error" in result and "not found" in result["error"].lower():
+                st.error(f"❗ {result['error']}\n\nPlease make sure you have parsed the file first using the 'Parse Files' tab.")
+            elif "error" in result:
+                st.error(result["error"])
+            else:
+                st.success(result.get("message", "Ingestion successful!"))
+    else:
+        st.info("Please select a .md file to ingest.")
+
+def hybrid_search_tab():
+    st.header("Hybrid Search")
+    st.write("Perform a hybrid search using Pinecone and BM25.")
+    query = st.text_input("Enter your search query", placeholder="e.g. 'What is the main idea of the document?'")
+    if st.button("Search", type="primary"):
+        if query:
+            with st.spinner("Performing hybrid search..."):
+                result = make_api_request(HYBRID_SEARCH_API_URL, method="post", data={"query": query})
+                if "error" in result:
+                    st.error(result["error"])
+                else:
+                    st.success("Hybrid search completed successfully!")
+                    st.write(result.get("result", "No results found."))
+        else:
+            st.info("Please enter a search query.")
 
 if __name__ == "__main__":
     main()
