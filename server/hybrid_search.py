@@ -106,8 +106,6 @@ template = """Answer the question based only on the following context:
 
 Question: {question}
 
-List the entire document that contains the answer to the question.
-
 """
 
 prompt = ChatPromptTemplate.from_template(template)

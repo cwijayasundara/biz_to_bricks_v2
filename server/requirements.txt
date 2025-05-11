@@ -1,0 +1,17 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+pydantic==2.11.4
+python-dotenv==1.1.0
+python-multipart==0.0.20
+nest-asyncio==1.6.0
+llama-parse==0.6.21
+llama-index-core==0.12.34.post1
+langchain-core==0.3.58
+langchain==0.3.25
+langchain-community==0.3.23
+langchain-openai==0.3.16
+langchain-pinecone==0.2.5
+pinecone-text==0.10.0
+pinecone-client==6.0.0
+openai==1.77.0
+unstructured[md]==0.17.2
