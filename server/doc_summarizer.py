@@ -42,7 +42,7 @@ def summarize_text_content(text_content: str):
 
 # Test block commented out
 # if __name__ == "__main__":
-#     from file_util import load_markdown_file
+#     from file_util_enhanced import load_markdown_file
 #     base_dir = pathlib.Path(__file__).parent
 #     # Assuming a test file exists for manual testing if needed
 #     test_file_path = base_dir / "parsed_files" / "Sample1.md"

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Body, HTTPException, status, Path, Query
 from fastapi.responses import JSONResponse
-from file_util import create_directory, list_files as list_directory, load_markdown_file
+from file_util_enhanced import get_file_manager, create_directory, list_files as list_directory, load_markdown_file
 from file_parser import parse_file_with_llama_parse
 from doc_summarizer import summarize_text_content
 from pydantic import BaseModel, Field
@@ -23,6 +23,9 @@ UPLOADED_FILE_PATH = "uploaded_files"
 PARSED_FILE_PATH = "parsed_files"
 EDITED_FILE_PATH = "edited_files"
 SUMMARIZED_FILE_PATH = "summarized_files"
+
+# Initialize file manager
+file_manager = get_file_manager()
 
 # Initialize FastAPI app
 @asynccontextmanager
@@ -77,8 +80,9 @@ def ensure_directories_exist():
 
 def get_file_path(directory: str, filename: str, extension: Optional[str] = None) -> str:
     """Construct file path with proper handling"""
-    base_name = filename.split(".")[0] if "." in filename else filename
     if extension:
+        # Use pathlib to properly extract base filename without extension
+        base_name = FilePath(filename).stem
         return str(FilePath(directory) / f"{base_name}{extension}")
     return str(FilePath(directory) / filename)
 
@@ -107,13 +111,12 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         # Save the uploaded file
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        saved_path = file_manager.save_binary_file(UPLOADED_FILE_PATH, file.filename, content)
         
-        logger.info(f"File saved to {file_path}")
+        logger.info(f"File saved to {saved_path}")
         return {
             "filename": file.filename, 
-            "file_path": file_path
+            "file_path": saved_path
         }
     except Exception as e:
         logger.error(f"Error saving file {file.filename}: {str(e)}")
@@ -145,6 +148,66 @@ async def list_files(directory: str = Path(..., description="Directory to list f
             detail=f"Error listing files: {str(e)}"
         )
 
+@app.delete("/deletefile/{directory}/{filename}", response_model=SuccessResponse)
+async def delete_file(
+    directory: str = Path(..., description="Directory containing the file"),
+    filename: str = Path(..., description="Name of the file to delete")
+):
+    """
+    Delete a file from the specified directory.
+    
+    Args:
+        directory: The directory containing the file
+        filename: Name of the file to delete
+        
+    Returns:
+        Success message if file was deleted
+    """
+    logger.info(f"Deleting file: {directory}/{filename}")
+    
+    # Validate directory
+    valid_directories = ["uploaded_files", "parsed_files", "edited_files", "summarized_files", "bm25_indexes"]
+    if directory not in valid_directories:
+        logger.error(f"Invalid directory: {directory}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid directory. Must be one of: {', '.join(valid_directories)}"
+        )
+    
+    try:
+        # Check if file exists before attempting deletion
+        if not file_manager.file_exists(directory, filename):
+            logger.error(f"File not found: {directory}/{filename}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"File {filename} not found in {directory}"
+            )
+        
+        # Delete the file
+        success = file_manager.delete_file(directory, filename)
+        
+        if success:
+            logger.info(f"Successfully deleted file: {directory}/{filename}")
+            return {
+                "status": "success",
+                "message": f"File {filename} deleted successfully from {directory}"
+            }
+        else:
+            logger.error(f"Failed to delete file: {directory}/{filename}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete file {filename}"
+            )
+            
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.error(f"Error deleting file {directory}/{filename}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting file: {str(e)}"
+        )
+
 @app.get("/parsefile/{filename}")
 async def parse_uploaded_file(filename: str = Path(..., description="Name of the file to parse")):
     """
@@ -160,32 +223,32 @@ async def parse_uploaded_file(filename: str = Path(..., description="Name of the
     
     try:
         # Check if the parsed file already exists
-        base_filename = filename.split(".")[0]
+        # Use pathlib to properly extract base filename without extension
+        base_filename = FilePath(filename).stem
         parsed_file_path = get_file_path(PARSED_FILE_PATH, base_filename, extension=".md")
         uploaded_file_path = get_file_path(UPLOADED_FILE_PATH, filename)
         
         text_content = ""
         metadata: Dict[str, Any] = {}
         
-        if os.path.exists(parsed_file_path):
-            logger.info(f"Using existing parsed file: {parsed_file_path}")
-            with open(parsed_file_path, "r") as f:
-                text_content = f.read()
+        if file_manager.file_exists(PARSED_FILE_PATH, f"{base_filename}.md"):
+            logger.info(f"Using existing parsed file: {base_filename}.md")
+            text_content = file_manager.load_file(PARSED_FILE_PATH, f"{base_filename}.md")
             metadata = {
                 "file_name": base_filename, 
                 "file_path": f"{PARSED_FILE_PATH}/{base_filename}"
             }
         else:
-            logger.info(f"Parsing new file: {uploaded_file_path}")
-            text_content, metadata = parse_file_with_llama_parse(uploaded_file_path)
+            logger.info(f"Parsing new file: {filename}")
+            # Get the uploaded file path for parsing
+            uploaded_file_local_path = file_manager.get_file_path(UPLOADED_FILE_PATH, filename)
+            text_content, metadata = parse_file_with_llama_parse(uploaded_file_local_path)
             metadata["file_name"] = base_filename
             metadata["file_path"] = f"{PARSED_FILE_PATH}/{base_filename}"
             
             # Save the parsed content
-            create_directory(PARSED_FILE_PATH)
-            with open(parsed_file_path, "w") as f:
-                f.write(text_content)
-            logger.info(f"Saved parsed content to {parsed_file_path}")
+            saved_path = file_manager.save_file(PARSED_FILE_PATH, f"{base_filename}.md", text_content)
+            logger.info(f"Saved parsed content to {saved_path}")
             
         return {"text_content": text_content, "metadata": metadata}
         
@@ -211,7 +274,7 @@ async def save_content(
     Save edited content to a file.
     
     Args:
-        filename: Name of the file to save content for
+        filename: Name of the file to save content for (can be with or without extension)
         content_update: The content to save
         
     Returns:
@@ -220,16 +283,16 @@ async def save_content(
     logger.info(f"Saving content for file: {filename}")
     
     try:
-        create_directory(EDITED_FILE_PATH)
-        file_path = get_file_path(EDITED_FILE_PATH, filename, extension=".md")
+        # Extract base filename without extension to ensure consistency
+        base_filename = FilePath(filename).stem
+        logger.info(f"Using base filename: {base_filename}")
         
-        with open(file_path, "w") as f:
-            f.write(content_update.content)
+        saved_path = file_manager.save_file(EDITED_FILE_PATH, f"{base_filename}.md", content_update.content)
             
-        logger.info(f"Content saved to {file_path}")
+        logger.info(f"Content saved to {saved_path}")
         return {
             "status": "success", 
-            "message": f"Content for {filename} saved successfully"
+            "message": f"Content for {base_filename} saved successfully"
         }
     except Exception as e:
         logger.error(f"Error saving content for {filename}: {str(e)}")
@@ -246,7 +309,7 @@ async def summarize_content(
     Parse a file from the parsed_files directory and return its summary.
     
     Args:
-        filename: Name of the file to summarize
+        filename: Name of the file to summarize (can be with or without extension)
         
     Returns:
         Summary of the file content and metadata
@@ -254,48 +317,53 @@ async def summarize_content(
     logger.info(f"Summarizing file: {filename}")
     
     try:
-        # Summarize edited file if available, else fallback to parsed
-        edited_file_path = get_file_path(EDITED_FILE_PATH, filename, extension=".md")
-        if os.path.exists(edited_file_path):
-            file_path = edited_file_path
-        else:
-            file_path = get_file_path(PARSED_FILE_PATH, filename, extension=".md")
-        summarized_file_path = get_file_path(SUMMARIZED_FILE_PATH, filename)
+        # Extract base filename without extension to ensure consistency
+        # This handles both "Sample1.pdf" and "Sample1" as input
+        base_filename = FilePath(filename).stem
+        logger.info(f"Using base filename: {base_filename}")
         
         # Check if the summarized file already exists
-        if os.path.exists(summarized_file_path):
-            logger.info(f"Using existing summarized file: {summarized_file_path}")
-            with open(summarized_file_path, "r") as f:
-                summary = f.read()
+        if file_manager.file_exists(SUMMARIZED_FILE_PATH, base_filename):
+            logger.info(f"Using existing summarized file: {base_filename}")
+            summary = file_manager.load_file(SUMMARIZED_FILE_PATH, base_filename)
             metadata = {
-                "file_name": filename, 
-                "file_path": f"{SUMMARIZED_FILE_PATH}/{filename}"
+                "file_name": base_filename, 
+                "file_path": f"{SUMMARIZED_FILE_PATH}/{base_filename}"
             }
             return {"summary": summary, "metadata": metadata}
         
-        # Load and summarize the file
-        logger.info(f"Loading file for summarization: {file_path}")
-        text_content, metadata = load_markdown_file(file_path)
+        # Load content - prioritize edited file over parsed file
+        text_content = ""
+        if file_manager.file_exists(EDITED_FILE_PATH, f"{base_filename}.md"):
+            logger.info(f"Loading edited file for summarization: {base_filename}.md")
+            text_content = file_manager.load_file(EDITED_FILE_PATH, f"{base_filename}.md")
+            metadata = {"source": "edited_file"}
+        elif file_manager.file_exists(PARSED_FILE_PATH, f"{base_filename}.md"):
+            logger.info(f"Loading parsed file for summarization: {base_filename}.md")
+            text_content = file_manager.load_file(PARSED_FILE_PATH, f"{base_filename}.md")
+            metadata = {"source": "parsed_file"}
+        else:
+            raise FileNotFoundError(f"No file found for {base_filename} in edited_files or parsed_files")
         
-        logger.info(f"Generating summary for {filename}")
+        logger.info(f"Generating summary for {base_filename}")
         summary = summarize_text_content(text_content)
         
         # Save the summary
-        create_directory(SUMMARIZED_FILE_PATH)
-        metadata["file_name"] = filename
-        metadata["file_path"] = f"{SUMMARIZED_FILE_PATH}/{filename}"
+        metadata["file_name"] = base_filename
+        metadata["file_path"] = f"{SUMMARIZED_FILE_PATH}/{base_filename}"
         
-        with open(summarized_file_path, "w") as f:
-            f.write(summary)
+        saved_path = file_manager.save_file(SUMMARIZED_FILE_PATH, base_filename, summary)
             
-        logger.info(f"Summary saved to {summarized_file_path}")
+        logger.info(f"Summary saved to {saved_path}")
         return {"summary": summary, "metadata": metadata}
         
-    except FileNotFoundError:
-        logger.error(f"File not found for summarization: {file_path}")
+    except FileNotFoundError as e:
+        logger.error(f"File not found for summarization: {e}")
+        # Use base_filename if it was extracted, otherwise use original filename
+        display_filename = FilePath(filename).stem if filename else filename
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": f"File {filename} not found in parsed_files directory"}
+            content={"error": f"File {display_filename} not found in edited_files or parsed_files directories"}
         )
     except Exception as e:
         logger.error(f"Error during summarization for {filename}: {str(e)}")
@@ -310,13 +378,18 @@ async def ingest_documents(filename: str = Path(..., description="Name of the fi
     Ingest documents to Pinecone and BM25 index.
     """
     try:
-        ingest_documents_to_pinecone_and_bm25(filename)
-        return {"message": f"Documents ingested to Pinecone and BM25 index for {filename}"}
+        # Extract base filename without extension to ensure consistency
+        base_filename = FilePath(filename).stem
+        logger.info(f"Ingesting documents for base filename: {base_filename}")
+        
+        ingest_documents_to_pinecone_and_bm25(base_filename)
+        return {"message": f"Documents ingested to Pinecone and BM25 index for {base_filename}"}
     except FileNotFoundError as e:
         logger.error(f"File not found for ingestion: {e}")
+        base_filename = FilePath(filename).stem if filename else filename
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": f"File {filename} not found in server/edited_files or server/parsed_files. Please parse the file first."}
+            content={"error": f"File {base_filename} not found in server/edited_files or server/parsed_files. Please parse the file first."}
         )
     except Exception as e:
         logger.error(f"Error during ingestion for {filename}: {str(e)}")
